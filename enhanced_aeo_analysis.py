@@ -479,6 +479,19 @@ def fetch_site_description(url):
                 tw_desc = soup.find("meta", attrs={"name": "twitter:description"})
                 if tw_desc and tw_desc.get("content"):
                     desc = tw_desc.get("content").strip()
+                else:
+                    # 4. Fallback: use first non-empty meta content (excluding title-related tags)
+                    for meta in soup.find_all("meta"):
+                        name = meta.get("name", "").lower()
+                        prop = meta.get("property", "").lower()
+                        if (
+                            (name and "title" not in name and "description" not in name) or
+                            (prop and "title" not in prop and "description" not in prop)
+                        ):
+                            content = meta.get("content")
+                            if content and content.strip():
+                                desc = content.strip()
+                                break
         
         return {"title": title, "description": desc}
     except Exception as e:

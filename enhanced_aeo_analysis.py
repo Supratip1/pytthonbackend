@@ -64,6 +64,7 @@ else:
     print("⚠️  GEMINI_API_KEY not found. Enhanced features will be limited.")
     print("💡 Set GEMINI_API_KEY environment variable for full functionality.")
 
+SERPER_API_KEY = os.getenv('SERPER_API_KEY', '')
 
 # ========== VALIDATION FUNCTIONS ==========
 def validate_scores(results):
@@ -439,42 +440,98 @@ Here is the AEO audit output:
 
     
 def fetch_site_description(url):
-    """Fetch site title and description using competitor.py approach"""
+    """Fetch site title and description using multiple strategies for robustness"""
     try:
         resp = session.get(url, timeout=CONFIG['timeout'])
         if resp.status_code != 200:
             return {"title": "", "description": ""}
         
         soup = BeautifulSoup(resp.text, 'html.parser')
+        # --- Title extraction ---
         title = ""
+        # 1. <title> tag
         if soup.title and soup.title.string:
             title = soup.title.string.strip()
+        # 2. <meta name="title">
+        elif soup.find("meta", attrs={"name": "title"}):
+            meta_title = soup.find("meta", attrs={"name": "title"})
+            if meta_title.get("content"):
+                title = meta_title.get("content").strip()
+        # 3. <meta property="og:title">
+        elif soup.find("meta", attrs={"property": "og:title"}):
+            og_title = soup.find("meta", attrs={"property": "og:title"})
+            if og_title.get("content"):
+                title = og_title.get("content").strip()
         
-        # Try multiple meta description sources
+        # --- Description extraction ---
         desc = ""
-        meta_desc = soup.find("meta", attrs={"name":"description"}) or soup.find("meta", attrs={"property":"og:description"})
-        if meta_desc:
-            try:
-                content = meta_desc.get("content")
-                if content:
-                    desc = content.strip()
-            except (KeyError, TypeError):
-                desc = ""
+        # 1. <meta name="description">
+        meta_desc = soup.find("meta", attrs={"name": "description"})
+        if meta_desc and meta_desc.get("content"):
+            desc = meta_desc.get("content").strip()
+        else:
+            # 2. <meta property="og:description">
+            og_desc = soup.find("meta", attrs={"property": "og:description"})
+            if og_desc and og_desc.get("content"):
+                desc = og_desc.get("content").strip()
+            else:
+                # 3. <meta name="twitter:description">
+                tw_desc = soup.find("meta", attrs={"name": "twitter:description"})
+                if tw_desc and tw_desc.get("content"):
+                    desc = tw_desc.get("content").strip()
         
         return {"title": title, "description": desc}
     except Exception as e:
         return {"title": "", "description": ""}
 
-def get_competitor_links(domain):
-    """Get competitor links using Gemini with enhanced site information"""
-    if not api_key:
+def get_serper_competitors(query, your_domain, api_key):
+    """Fetch competitor domains from Serper SERP API for a given query."""
+    try:
+        headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+        payload = {"q": query, "num": 10, "gl": "us", "hl": "en"}
+        resp = requests.post("https://google.serper.dev/search", json=payload, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print("DEBUG: Serper API error:", resp.status_code, resp.text)
+            return []
+        data = resp.json()
+        competitors = set()
+        for result in data.get("organic", []):
+            url = result.get("link")
+            if url and your_domain not in url:
+                # Extract root domain
+                try:
+                    domain = url.split("//")[-1].split("/")[0].replace("www.", "")
+                    if domain != your_domain.replace("www.", ""):
+                        competitors.add(domain)
+                except Exception as e:
+                    continue
+        print("DEBUG: Serper competitors:", competitors)
+        return list(competitors)[:5]
+    except Exception as e:
+        print("DEBUG: Exception in get_serper_competitors:", str(e))
         return []
-    
+
+def get_competitor_links(domain):
+    """Get competitor links using Serper SERP API or Gemini as fallback"""
+    print("DEBUG: Entered get_competitor_links for domain:", domain)
+    print("DEBUG: SERPER_API_KEY present?", bool(SERPER_API_KEY))
+    if SERPER_API_KEY:
+        site_info = fetch_site_description(domain)
+        description = site_info.get("description", "")
+        query = description if description else domain  # Use description if available, else fallback
+        print("DEBUG: Serper query:", query)
+        competitors = get_serper_competitors(query, domain, SERPER_API_KEY)
+        print("DEBUG: Using Serper competitors:", competitors)
+        return [f"https://{d}" for d in competitors]
+    print("DEBUG: API key present?", bool(api_key))
+    if not api_key:
+        print("DEBUG: No API key found.")
+        return []
     # Fetch site description to provide context to Gemini
     site_info = fetch_site_description(domain)
     title = site_info.get("title", "")
     description = site_info.get("description", "")
-    
+    print("DEBUG: Site info:", site_info)
     prompt = f"""
 You are an expert in Answer Engine Optimization (AEO) competitor analysis. 
 
@@ -490,22 +547,26 @@ Identify exactly 5 direct competitors that:
 4. Have strong AEO practices (rich structured data, optimized snippets, clear content hierarchy)
 
 Provide only a JSON array of exactly 5 root URLs, no additional text.
-Example: ["https://competitor1.com", "https://competitor2.com", "https://competitor3.com", "https://competitor4.com", "https://competitor5.com"]
+Example: [\"https://competitor1.com\", \"https://competitor2.com\", \"https://competitor3.com\", \"https://competitor4.com\", \"https://competitor5.com\"]
 """
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
         response = model.generate_content(prompt)
         raw = response.text.strip()
+        print("DEBUG: Gemini raw response:", raw)
         start = raw.find('[')
         end = raw.rfind(']') + 1
         if start == -1 or end == 0:
+            print("DEBUG: No valid JSON array found in Gemini response.")
             return []
         json_str = raw[start:end]
         candidates = json.loads(json_str)
-        # Return exactly 5 valid URLs without filtering
+        print("DEBUG: Parsed candidates:", candidates)
         valid_candidates = [url for url in candidates if url.startswith("http") or url.startswith("https")]
+        print("DEBUG: Valid candidates:", valid_candidates)
         return valid_candidates[:5]  # Ensure exactly 5 competitors
     except Exception as e:
+        print("DEBUG: Exception in get_competitor_links:", str(e))
         return []
 
 

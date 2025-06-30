@@ -408,7 +408,7 @@ Here is the AEO audit output:
 {json.dumps(audit_results, indent=2)}
 """
         try:
-            model = genai.GenerativeModel("gemini-2.5-flash")
+            model = genai.GenerativeModel("gemini-1.5-pro")
             response = model.generate_content(prompt)
             raw = response.text.strip()
             
@@ -440,59 +440,86 @@ Here is the AEO audit output:
 
     
 def fetch_site_description(url):
-    """Fetch site title and description using multiple strategies for robustness"""
+    """Fetch site title and description using structured data, meta tags, H1, and body content for robustness"""
     try:
         resp = session.get(url, timeout=CONFIG['timeout'])
         if resp.status_code != 200:
             return {"title": "", "description": ""}
-        
         soup = BeautifulSoup(resp.text, 'html.parser')
         # --- Title extraction ---
         title = ""
-        # 1. <title> tag
         if soup.title and soup.title.string:
             title = soup.title.string.strip()
-        # 2. <meta name="title">
         elif soup.find("meta", attrs={"name": "title"}):
             meta_title = soup.find("meta", attrs={"name": "title"})
             if meta_title.get("content"):
                 title = meta_title.get("content").strip()
-        # 3. <meta property="og:title">
         elif soup.find("meta", attrs={"property": "og:title"}):
             og_title = soup.find("meta", attrs={"property": "og:title"})
             if og_title.get("content"):
                 title = og_title.get("content").strip()
-        
         # --- Description extraction ---
         desc = ""
-        # 1. <meta name="description">
-        meta_desc = soup.find("meta", attrs={"name": "description"})
-        if meta_desc and meta_desc.get("content"):
-            desc = meta_desc.get("content").strip()
-        else:
-            # 2. <meta property="og:description">
-            og_desc = soup.find("meta", attrs={"property": "og:description"})
-            if og_desc and og_desc.get("content"):
-                desc = og_desc.get("content").strip()
+        # 1. Try structured data (JSON-LD, Microdata, RDFa)
+        try:
+            data = extruct.extract(resp.text, base_url=url, syntaxes=["json-ld", "microdata", "rdfa"])
+            # Look for industry/category/about in Organization, WebSite, or mainEntity
+            candidates = []
+            for syntax in ["json-ld", "microdata", "rdfa"]:
+                for item in data.get(syntax, []):
+                    if isinstance(item, dict):
+                        # Check for industry, category, about, description
+                        for key in ["industry", "category", "about", "description"]:
+                            val = item.get(key)
+                            if val and isinstance(val, str) and len(val.strip()) > 10:
+                                candidates.append(val.strip())
+                        # Check for nested 'about' or 'description'
+                        if "about" in item and isinstance(item["about"], dict):
+                            about_val = item["about"].get("name") or item["about"].get("description")
+                            if about_val and isinstance(about_val, str) and len(about_val.strip()) > 10:
+                                candidates.append(about_val.strip())
+            if candidates:
+                desc = candidates[0]
+        except Exception:
+            pass
+        # 2. Meta tags (if no structured data found)
+        if not desc:
+            meta_desc = soup.find("meta", attrs={"name": "description"})
+            if meta_desc and meta_desc.get("content"):
+                desc = meta_desc.get("content").strip()
             else:
-                # 3. <meta name="twitter:description">
-                tw_desc = soup.find("meta", attrs={"name": "twitter:description"})
-                if tw_desc and tw_desc.get("content"):
-                    desc = tw_desc.get("content").strip()
+                og_desc = soup.find("meta", attrs={"property": "og:description"})
+                if og_desc and og_desc.get("content"):
+                    desc = og_desc.get("content").strip()
                 else:
-                    # 4. Fallback: use first non-empty meta content (excluding title-related tags)
-                    for meta in soup.find_all("meta"):
-                        name = meta.get("name", "").lower()
-                        prop = meta.get("property", "").lower()
-                        if (
-                            (name and "title" not in name and "description" not in name) or
-                            (prop and "title" not in prop and "description" not in prop)
-                        ):
-                            content = meta.get("content")
-                            if content and content.strip():
-                                desc = content.strip()
-                                break
-        
+                    tw_desc = soup.find("meta", attrs={"name": "twitter:description"})
+                    if tw_desc and tw_desc.get("content"):
+                        desc = tw_desc.get("content").strip()
+                    else:
+                        # Fallback: use first non-empty meta content (excluding title-related tags)
+                        for meta in soup.find_all("meta"):
+                            name = meta.get("name", "").lower()
+                            prop = meta.get("property", "").lower()
+                            if (
+                                (name and "title" not in name and "description" not in name) or
+                                (prop and "title" not in prop and "description" not in prop)
+                            ):
+                                content = meta.get("content")
+                                if content and content.strip():
+                                    desc = content.strip()
+                                    break
+        # 3. H1 tag (if no meta/structured data found)
+        if not desc:
+            h1 = soup.find("h1")
+            if h1 and h1.get_text(strip=True):
+                desc = h1.get_text(strip=True)
+        # 4. First non-empty paragraph (if no H1 found)
+        if not desc:
+            for p in soup.find_all("p"):
+                text = p.get_text(strip=True)
+                if text and len(text) > 10:
+                    desc = text
+                    break
         return {"title": title, "description": desc}
     except Exception as e:
         return {"title": "", "description": ""}
@@ -563,7 +590,7 @@ Provide only a JSON array of exactly 5 root URLs, no additional text.
 Example: [\"https://competitor1.com\", \"https://competitor2.com\", \"https://competitor3.com\", \"https://competitor4.com\", \"https://competitor5.com\"]
 """
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-pro")
         response = model.generate_content(prompt)
         raw = response.text.strip()
         print("DEBUG: Gemini raw response:", raw)
